@@ -8,6 +8,7 @@
 		<param name="dt" type="double" value="0.01" />
 		<param name="T" type="int" value="300" />
 		<param name="compute_time" type="double" value="0.09" />
+		<param name="laser_spread" type="double" value="0.314" />
 		<param name="laser_offset" type="double" value="1.0" />
 	</node>
 

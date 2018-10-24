@@ -10,9 +10,31 @@ from ackermann_msgs.msg import AckermannDriveStamped
 
 import utils
 
+# The topic to publish control commands to
 PUB_TOPIC = '/vesc/high_level/ackermann_cmd_mux/input/nav_0'
 
+'''
+Follows a given plan using constant velocity and PID control of the steering angle
+'''
 class LineFollower:
+
+  '''
+  Initializes the line follower
+    plan: A list of length T that represents the path that the robot should follow
+          Each element of the list is a 3-element numpy array of the form [x,y,theta]
+    pose_topic: The topic that provides the current pose of the robot as a PoseStamped msg
+    plan_lookahead: If the robot is currently closest to the i-th pose in the plan,
+                    then it should navigate towards the (i+plan_lookahead)-th pose in the plan
+    translation_weight: How much the error in translation should be weighted in relation
+                        to the error in rotation
+    rotation_weight: How much the error in rotation should be weighted in relation
+                     to the error in translation
+    kp: The proportional PID parameter
+    ki: The integral PID parameter
+    kd: The derivative PID parameter
+    error_buff_length: The length of the buffer that is storing past error values
+    speed: The speed at which the robot should travel
+  '''
   def __init__(self, plan, pose_topic, plan_lookahead, translation_weight,
                rotation_weight, kp, ki, kd, error_buff_length, speed):
     self.plan = plan
@@ -30,7 +52,12 @@ class LineFollower:
     
     self.pose_sub = rospy.Subscriber(pose_topic, PoseStamped, self.pose_cb, queue_size=1)
   
-  # cur_pose: The current pose of the car, represented as a numpy array [x,y,theta]
+  '''
+  Computes the error based on the current pose of the car
+    cur_pose: The current pose of the car, represented as a numpy array [x,y,theta]
+  Returns: (False, 0.0) if the end of the plan has been reached. Otherwise, returns
+           (True, E) - where E is the computed error
+  '''
   def compute_error(self, cur_pose):
     rot_mat = utils.rotation_matrix(-1*cur_pose[2])    
     while len(self.plan) > 0:
@@ -55,6 +82,11 @@ class LineFollower:
              self.rotation_weight * (self.plan[goal_idx][2]-cur_pose[2]))
     return True, error
     
+  '''
+  Uses a PID control policy to generate a steering angle from the passed error
+    error: The current error
+  Returns: The steering angle that should be executed
+  '''    
   def compute_steering_angle(self, error):
     now = rospy.Time.now().to_sec()
     
@@ -68,7 +100,12 @@ class LineFollower:
       sum_error += 0.5*(self.error_buff[i][0]+self.error_buff[i+1][0])*(self.error_buff[i+1][1]-self.error_buff[i][1])
     
     return self.kp*error + self.ki*sum_error + self.kd * derror_dt
-    
+
+  '''
+  Callback for the current pose of the car
+    msg: A PoseStamped representing the current pose of the car
+    This is the exact callback that we used in our solution, but feel free to change it
+  '''      
   def pose_cb(self, msg):
     cur_pose = np.array([msg.pose.position.x,
                          msg.pose.position.y,

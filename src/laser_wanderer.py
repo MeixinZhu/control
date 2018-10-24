@@ -11,26 +11,51 @@ from sensor_msgs.msg import LaserScan
 from ackermann_msgs.msg import AckermannDriveStamped
 from geometry_msgs.msg import PoseStamped, PoseArray, Pose
 
-SCAN_TOPIC = '/scan'
-CMD_TOPIC = '/vesc/high_level/ackermann_cmd_mux/input/nav_0'
-POSE_TOPIC = '/sim_car_pose/pose'
-VIZ_TOPIC = '/laser_wanderer/rollouts'
+SCAN_TOPIC = '/scan' # The topic to subscribe to for laser scans
+CMD_TOPIC = '/vesc/high_level/ackermann_cmd_mux/input/nav_0' # The topic to publish controls to
+POSE_TOPIC = '/sim_car_pose/pose' # The topic to subscribe to for current pose of the car
+VIZ_TOPIC = '/laser_wanderer/rollouts' # The topic to publish to for vizualizing
+                                       # the computed rollouts. Publish a PoseArray.
 
-MAX_PENALTY = 10000
+MAX_PENALTY = 10000 # The penalty to apply when a configuration in a rollout
+                    # goes beyond the corresponding laser scan
 
+'''
+Wanders around using minimum (steering angle) control effort while avoiding crashing
+based off of laser scans. 
+'''
 class LaserWanderer:
-  def __init__(self, rollouts, deltas, speed, compute_time, laser_offset):
+
+  '''
+  Initializes the LaserWanderer
+    rollouts: An NxTx3 numpy array that contains N rolled out trajectories, each
+              containing T poses. For each trajectory, the t-th element represents
+              the [x,y,theta] pose of the car at time t+1
+    deltas: An N dimensional array containing the possible steering angles. The n-th
+            element of this array is the steering angle that would result in the 
+            n-th trajectory in rollouts
+    speed: The speed at which the car should travel
+    compute_time: The amount of time (in seconds) we can spend computing the cost
+    laser_offset: How much to shorten the laser measurements
+  '''
+  def __init__(self, rollouts, deltas, speed, compute_time, laser_spread, laser_offset):
     self.rollouts = rollouts
     self.deltas = deltas
     self.speed = speed
     self.compute_time = compute_time
+    self.laser_spread = laser_spread
     self.laser_offset = laser_offset
     
     self.cmd_pub = rospy.Publisher(CMD_TOPIC, AckermannDriveStamped, queue_size=1)
     self.laser_sub = rospy.Subscriber(SCAN_TOPIC, LaserScan, self.wander_cb, queue_size=2)
     self.viz_sub = rospy.Subscriber(POSE_TOPIC, PoseStamped, self.viz_sub, queue_size=1)
     self.viz_pub = rospy.Publisher(VIZ_TOPIC, PoseArray, queue_size=1)
-    
+
+  '''
+  Vizualize the rollouts. Transforms the rollouts to be in the frame of the world.
+  Only display the last pose of each rollout to prevent lagginess
+    msg: A PoseStamped representing the current pose of the car
+  '''      
   def viz_sub(self, msg):
     pa = PoseArray()
     pa.header.frame_id = '/map'
@@ -50,7 +75,15 @@ class LaserWanderer:
         pose.orientation = utils.angle_to_quaternion(self.rollouts[i,-1,2]+car_yaw)
         pa.poses.append(pose)
     self.viz_pub.publish(pa)
-    
+
+  '''
+  Compute the cost of one step in the trajectory. It should penalize the magnitude
+  of the steering angle. It should also heavily penalize crashing into an object
+  (as determined by the laser scans)
+    delta: The steering angle that corresponds to this trajectory
+    rollout_pose: The pose in the trajectory 
+    laser_msg: The most recent laser scan
+  '''      
   def compute_cost(self, delta, rollout_pose, laser_msg):
     cost = np.abs(delta)
     
@@ -64,11 +97,23 @@ class LaserWanderer:
     if scan_idx < 0 or scan_idx >= len(laser_msg.ranges):
         return cost
     
+    min_scan_idx = max(0, scan_idx-int(0.5*self.laser_spread/laser_msg.angle_increment)-1)
+    max_scan_idx = min(len(laser_msg.ranges)-1, scan_idx+int(0.5*self.laser_spread/laser_msg.angle_increment)+1)
+    laser_scans = np.array(laser_msg.ranges[min_scan_idx:max_scan_idx+1], dtype=np.float)
+    laser_scans[np.isnan(laser_scans)] = 100.0 
+    laser_scans[laser_scans[:] == 0] = 100.0
+    scan_idx = min_scan_idx + np.argmin(laser_scans)
+    
     if (not math.isnan(laser_msg.ranges[scan_idx])) and (raycast_length > laser_msg.ranges[scan_idx] - np.abs(self.laser_offset)):
         cost += MAX_PENALTY
         
     return cost    
-    
+
+  '''
+  Controls the steering angle in response to the received laser scan. Uses approximately
+  self.compute_time amount of time to compute the control
+    msg: A LaserScan
+  '''    
   def wander_cb(self, msg):
     start = rospy.Time.now().to_sec()
     
@@ -145,6 +190,19 @@ def generate_rollout(init_pose, controls, car_length):
     
   return rollout
    
+'''
+Helper function to generate a number of kinematic car rollouts
+    speed: The speed at which the car should travel
+    min_delta: The minimum allowed steering angle (radians)
+    max_delta: The maximum allowed steering angle (radians)
+    delta_incr: The difference (in radians) between subsequent possible steering angles
+    dt: The amount of time to apply a control for
+    T: The number of time steps to rollout for
+    car_length: The length of the car
+Returns a NxTx3 numpy array that contains N rolled out trajectories, each
+containing T poses. For each trajectory, the t-th element represents the [x,y,theta]
+pose of the car at time t+1
+'''   
 def generate_mpc_rollouts(speed, min_delta, max_delta, delta_incr, dt, T, car_length):
 
   deltas = np.arange(min_delta, max_delta, delta_incr)
@@ -172,15 +230,16 @@ def main():
   max_delta = rospy.get_param("~max_delta", 0.341)
   delta_incr = rospy.get_param("~delta_incr", 0.34/3)
   dt = rospy.get_param("~dt", 0.01)
-  T = rospy.get_param("~T", 150)
+  T = rospy.get_param("~T", 300)
   car_length = rospy.get_param("car_kinematics/car_length", 0.33)
   compute_time = rospy.get_param("~compute_time", 0.09)
-  laser_offset = rospy.get_param("~laser_offset", 2.0)
+  laser_spread = rospy.get_param("~laser_spread", 0.314)
+  laser_offset = rospy.get_param("~laser_offset", 1.0)
   
   rollouts, deltas = generate_mpc_rollouts(speed, min_delta, max_delta,
                                            delta_incr, dt, T, car_length)
                                            
-  lw = LaserWanderer(rollouts, deltas, speed, compute_time, laser_offset)
+  lw = LaserWanderer(rollouts, deltas, speed, compute_time, laser_spread, laser_offset)
   rospy.spin()
   
 
