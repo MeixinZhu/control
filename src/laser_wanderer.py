@@ -48,15 +48,15 @@ class LaserWanderer:
     
     self.cmd_pub = rospy.Publisher(CMD_TOPIC, AckermannDriveStamped, queue_size=1)
     self.laser_sub = rospy.Subscriber(SCAN_TOPIC, LaserScan, self.wander_cb, queue_size=2)
-    self.viz_sub = rospy.Subscriber(POSE_TOPIC, PoseStamped, self.viz_sub, queue_size=1)
     self.viz_pub = rospy.Publisher(VIZ_TOPIC, PoseArray, queue_size=1)
+    self.viz_sub = rospy.Subscriber(POSE_TOPIC, PoseStamped, self.viz_sub_cb, queue_size=1)
 
   '''
   Vizualize the rollouts. Transforms the rollouts to be in the frame of the world.
   Only display the last pose of each rollout to prevent lagginess
     msg: A PoseStamped representing the current pose of the car
   '''      
-  def viz_sub(self, msg):
+  def viz_sub_cb(self, msg):
     pa = PoseArray()
     pa.header.frame_id = '/map'
     pa.header.stamp = rospy.Time.now()
