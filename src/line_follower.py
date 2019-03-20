@@ -8,6 +8,8 @@ import numpy as np
 from geometry_msgs.msg import PoseArray, PoseStamped
 from ackermann_msgs.msg import AckermannDriveStamped
 
+from sensor_msgs.msg import LaserScan
+
 import utils
 
 # The topic to publish control commands to
@@ -51,6 +53,11 @@ class LineFollower:
     self.cmd_pub = rospy.Publisher(PUB_TOPIC, AckermannDriveStamped, queue_size=1)
     
     self.pose_sub = rospy.Subscriber(pose_topic, PoseStamped, self.pose_cb, queue_size=1)
+
+    self.laser_sub = rospy.Subscriber('/scan', LaserScan, self.scan_cb, queue_size=2)
+    self.collision_flag = 0 # whether the car will collision in the future
+    self.angle_range = np.pi/8 # the angle range considered for collision check
+    self.min_dist = 0.1 # distance threshold for collision check
   
   '''
   Computes the error based on the current pose of the car
@@ -121,10 +128,35 @@ class LineFollower:
     ads = AckermannDriveStamped()
     ads.header.frame_id = '/map'
     ads.header.stamp = rospy.Time.now()
-    ads.drive.steering_angle = delta
-    ads.drive.speed = self.speed
-    
+    if self.collision_flag == 0:
+      ads.drive.steering_angle = delta
+      ads.drive.speed = self.speed
+    else:
+      ads.drive.steering_angle = 0
+      ads.drive.speed = -2
+
+
     self.cmd_pub.publish(ads)
+
+  # Newly added by meixin
+  def scan_cb(self, msg):
+    mid_angle_index = len(msg.ranges)/2
+    min_angle_index = int(mid_angle_index - (self.angle_range/2.0)/ msg.angle_increment)
+    max_angle_index = int(mid_angle_index + (self.angle_range / 2.0) / msg.angle_increment)
+
+    min_angle_index = max(0, min_angle_index)
+    max_angle_index = min(len(msg.ranges)-1, max_angle_index)
+
+    too_close_count = 0
+    for i in xrange(min_angle_index, max_angle_index):
+      if msg.ranges[i] < self.min_dist:
+        too_close_count += 1
+
+    if too_close_count/(max_angle_index - min_angle_index +1) >0.5:
+      self.collision_flag = 1
+    else:
+      self.collision_flag = 0
+
     
 def pose_to_config(msg):
     return np.array([msg.position.x,
